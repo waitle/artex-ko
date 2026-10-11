@@ -1026,10 +1026,30 @@ export interface NotificationDelivery {
 }
 
 // ---- LLM config ----
+export type LLMFormat = "openai" | "anthropic" | "openai-responses" | "openai-codex";
+
+export interface CodexOAuthStart {
+  verification_url: string;
+  user_code: string;
+  expires_at: string;
+  poll_interval: number; // seconds
+}
+
+export interface CodexOAuthPoll {
+  connected: boolean;
+  pending: boolean;
+}
+
+export interface CodexOAuthStatus {
+  connected: boolean;
+  email?: string;
+  expires_at?: string;
+}
+
 export interface LLMProfile {
   id: string;
   name: string;
-  format: "openai" | "anthropic" | "openai-responses";
+  format: LLMFormat;
   base_url?: string;
   proxy?: string;
   model: string;

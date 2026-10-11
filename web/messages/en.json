@@ -3218,6 +3218,29 @@
     }
   },
   "llmPage": {
+    "oauth": {
+      "provider": "OpenAI Codex (ChatGPT OAuth)",
+      "title": "ChatGPT OAuth",
+      "shared": "One ChatGPT account is shared by all Codex profiles on this server. Logging in does not activate a profile.",
+      "checking": "Checking connection…",
+      "starting": "Starting…",
+      "connected": "Connected",
+      "disconnected": "Not connected",
+      "pending": "Waiting for approval…",
+      "expired": "Login expired. Start again.",
+      "cancelled": "Login cancelled.",
+      "error": "Authentication failed. Try again.",
+      "invalidResponse": "Invalid device login response.",
+      "openVerification": "Open official verification page",
+      "code": "Device code:",
+      "copy": "Copy code",
+      "deadline": "Expires: {expires} · Poll interval: {seconds}s",
+      "restart": "Restart login",
+      "login": "Connect ChatGPT",
+      "cancel": "Cancel login",
+      "logout": "Disconnect all Codex profiles",
+      "modelHint": "Load models from the server"
+    },
     "page": {
       "subtitle": "Format / model / rate-limit settings shared by all agents. Click a card to edit; the star marks the active profile.",
       "poolConfig": "Rotation settings",

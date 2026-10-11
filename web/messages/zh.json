@@ -3218,6 +3218,29 @@
     }
   },
   "llmPage": {
+    "oauth": {
+      "provider": "OpenAI Codex (ChatGPT OAuth)",
+      "title": "ChatGPT OAuth",
+      "shared": "此服务器上的所有 Codex 配置共用一个 ChatGPT 账号。登录不会激活配置。",
+      "checking": "正在检查连接…",
+      "starting": "正在启动…",
+      "connected": "已连接",
+      "disconnected": "未连接",
+      "pending": "等待批准…",
+      "expired": "登录已过期。请重新开始。",
+      "cancelled": "登录已取消。",
+      "error": "认证失败。请重试。",
+      "invalidResponse": "无效的设备登录响应。",
+      "openVerification": "打开官方验证页面",
+      "code": "设备代码：",
+      "copy": "复制代码",
+      "deadline": "过期时间：{expires} · 轮询间隔：{seconds}秒",
+      "restart": "重新登录",
+      "login": "连接 ChatGPT",
+      "cancel": "取消登录",
+      "logout": "断开所有 Codex 配置",
+      "modelHint": "从服务器加载模型"
+    },
     "page": {
       "subtitle": "全 Agent 共享的格式 / 模型 / 限速配置。点击卡片编辑，星标为当前激活配置。",
       "poolConfig": "轮询配置",

@@ -20,6 +20,9 @@ import type {
   BatchCategoryItem,
   BatchControlItem,
   ChatAttachment,
+  CodexOAuthPoll,
+  CodexOAuthStart,
+  CodexOAuthStatus,
   CommandRecord,
   Company,
   CompanyScopeMutation,
@@ -922,6 +925,10 @@ export const api = {
   gc: (ttl = 86400) => post<{ removed: number }>(`/gc?ttl=${ttl}`, {}),
 
   // ---- LLM ----
+  startCodexOAuth: () => post<CodexOAuthStart>("/llm/oauth/codex/start", {}),
+  pollCodexOAuth: () => post<CodexOAuthPoll>("/llm/oauth/codex/poll", {}),
+  codexOAuthStatus: () => get<CodexOAuthStatus>("/llm/oauth/codex/status"),
+  logoutCodexOAuth: () => del<CodexOAuthStatus>("/llm/oauth/codex"),
   getLLM: () =>
     get<{
       configured: boolean;

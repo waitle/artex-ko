@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/codexoauth"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/compaction"
@@ -30,6 +31,7 @@ import (
 
 // Config describes the LLM backend resolved from the environment.
 type Config struct {
+	Codex   *codexoauth.Auth // Server-owned credential resolver; never serialized.
 	Format  llm.Format
 	BaseURL string
 	APIKey  string
@@ -166,6 +168,9 @@ func FromEnv() (Config, bool) {
 		Stream: !isFalsy(os.Getenv("ARTEX_LLM_STREAM")),
 	}
 	switch prov {
+	case "openai-codex":
+		c.Format = llm.Format("openai-codex")
+		return c, true // Server must bind its owned account and check Ready.
 	case "openai":
 		c.Format = llm.FormatOpenAI
 		c.APIKey = oaiKey
@@ -204,6 +209,8 @@ func ConfigFrom(provider, model, baseURL, apiKey, proxy string) Config {
 		Stream:  true, // 默认流式;调用方按 profile 覆盖
 	}
 	switch strings.TrimSpace(provider) {
+	case "openai-codex":
+		c.Format = llm.Format("openai-codex")
 	case "openai":
 		c.Format = llm.FormatOpenAI
 		// provider appends "/chat/completions"; tolerate a full endpoint URL.
@@ -242,6 +249,8 @@ func isFalsy(s string) bool {
 // Provider returns the short provider name ("anthropic"/"openai").
 func (c Config) Provider() string {
 	switch c.Format {
+	case llm.Format("openai-codex"):
+		return "openai-codex"
 	case llm.FormatOpenAI:
 		return "openai"
 	case llm.FormatOpenAIResponses:
@@ -254,6 +263,15 @@ func (c Config) Provider() string {
 // limiter lives on the single provider instance — so planner + all workers +
 // main agent (which share this provider) are bounded by one shared rate limit.
 func (c Config) NewProvider() (llm.Provider, error) {
+	if c.Provider() == "openai-codex" {
+		if c.BaseURL != "" || c.APIKey != "" || c.Proxy != "" {
+			return nil, fmt.Errorf("Codex OAuth does not accept base URL, API key or proxy overrides")
+		}
+		if c.Model == "" {
+			return nil, fmt.Errorf("Codex model selection required")
+		}
+		return codexoauth.NewProvider(c.Codex, llm.Config{Model: c.Model, ReasoningEffort: c.ReasoningEffort, MaxRetries: c.Retry.ConnectAttempts, RetryInterval: c.Retry.ConnectInterval, RateLimit: &llm.RateLimit{PerSecond: c.RatePerSecond, PerMinute: c.RatePerMinute}})
+	}
 	client, err := quotaAwareHTTPClient(c.Proxy, c.SessionHeaderKey)
 	if err != nil {
 		return nil, err
@@ -281,6 +299,14 @@ func (c Config) NewProvider() (llm.Provider, error) {
 		lc.RateLimit = &llm.RateLimit{PerSecond: c.RatePerSecond, PerMinute: c.RatePerMinute}
 	}
 	return llm.NewProvider(lc)
+}
+
+// Ready accepts keyless OAuth only with the server-owned authenticated account.
+func (c Config) Ready() bool {
+	if c.Provider() == "openai-codex" {
+		return c.Codex != nil && c.Codex.Status().Connected && c.BaseURL == "" && c.APIKey == "" && c.Proxy == ""
+	}
+	return c.APIKey != ""
 }
 
 // IsQuotaExhaustedMessage deliberately recognizes only explicit balance,

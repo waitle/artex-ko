@@ -509,7 +509,7 @@ func (s *Server) agentBindingProvider(agentKey string) (llm.Provider, agent.Conf
 func (s *Server) globalProvider() (llm.Provider, agent.Config, bool) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
-	if !s.llmOn || s.llmProv == nil {
+	if !s.llmOn || s.llmProv == nil || (s.llmCfg.Provider() == "openai-codex" && !s.llmCfg.Ready()) {
 		return nil, agent.Config{}, false
 	}
 	return s.llmProv, s.llmCfg, true

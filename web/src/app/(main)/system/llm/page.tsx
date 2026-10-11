@@ -28,9 +28,11 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
-import type { LLMPoolMember, LLMPoolStatus, LLMProfile, LLMRetryOverride } from "@/lib/types";
+import { codexProxy, codexTransport } from "@/lib/codex-oauth";
+import type { LLMFormat, LLMPoolMember, LLMPoolStatus, LLMProfile, LLMRetryOverride } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
+import { CodexOAuthPanel } from "./_components/codex-oauth";
 import { ProfileRetryFields, RetryPolicyPanel, ZERO_OVERRIDE } from "./_components/retry";
 
 // 思考开关(thinking.type)与思考强度(reasoning_effort)是两个【互相独立】的字段，
@@ -260,7 +262,7 @@ function ProfileSheet({
   const t = useTranslations("llmPage");
   const isNew = !profile;
   const [name, setName] = React.useState("");
-  const [format, setFormat] = React.useState<"anthropic" | "openai" | "openai-responses">("anthropic");
+  const [format, setFormat] = React.useState<LLMFormat>("anthropic");
   const [model, setModel] = React.useState("");
   const [baseUrl, setBaseUrl] = React.useState("");
   const [proxy, setProxy] = React.useState("");
@@ -283,6 +285,9 @@ function ProfileSheet({
   const [models, setModels] = React.useState<string[]>([]);
   const [loadingModels, setLoadingModels] = React.useState(false);
   const [modelsOpen, setModelsOpen] = React.useState(false);
+  const isCodex = format === "openai-codex";
+  const transport = codexTransport(format, baseUrl, apiKey, streaming);
+  const effectiveProxy = codexProxy(format, proxy);
 
   // 思考开关 / 上限字段名 / 思考强度三组选项的标签走 i18n，故在组件内按当前语言构造。
   const THINKING_TYPES: { value: string; label: string }[] = [
@@ -308,7 +313,7 @@ function ProfileSheet({
   React.useEffect(() => {
     if (!open) return;
     setName(profile?.name ?? "");
-    setFormat(profile?.format === "openai" || profile?.format === "openai-responses" ? profile.format : "anthropic");
+    setFormat(profile?.format ?? "anthropic");
     setModel(profile?.model ?? "");
     setBaseUrl(profile?.base_url ?? "");
     setProxy(profile?.proxy ?? "");
@@ -337,7 +342,7 @@ function ProfileSheet({
     setLoadingModels(true);
     setModels([]);
     try {
-      const r = await api.fetchLLMModels(format, baseUrl, apiKey, proxy, profileId);
+      const r = await api.fetchLLMModels(format, transport.base_url, transport.api_key, effectiveProxy, profileId);
       if (r.ok && r.models && r.models.length > 0) {
         setModels(r.models);
         setModelsOpen(true);
@@ -361,14 +366,14 @@ function ProfileSheet({
       const r = await api.testLLM(
         format,
         model,
-        baseUrl,
-        apiKey,
-        proxy,
-        toStore(thinkingType),
+        transport.base_url,
+        transport.api_key,
+        effectiveProxy,
+        isCodex ? "" : toStore(thinkingType),
         toStore(effort),
         profileId,
-        streaming,
-        sessionHeaderKey.trim(),
+        transport.streaming,
+        isCodex ? "" : sessionHeaderKey.trim(),
       );
       // 回复内容一并展示：看得见模型确实说了话，才算和会话里跑通是一回事。
       if (r.ok)
@@ -396,22 +401,22 @@ function ProfileSheet({
         name: name.trim(),
         format,
         model: model.trim(),
-        base_url: baseUrl.trim(),
-        proxy: proxy.trim(),
-        api_key: apiKey,
+        base_url: transport.base_url.trim(),
+        proxy: effectiveProxy.trim(),
+        api_key: transport.api_key,
         rate_per_second: Number(rps) || 0,
         rate_per_minute: Number(rpm) || 0,
         context_window_k: Number(cw) || 0,
-        thinking_type: toStore(thinkingType),
+        thinking_type: isCodex ? "" : toStore(thinkingType),
         reasoning_effort: toStore(effort),
         priority: Number(priority) || 0,
         pool_exclude: poolExclude,
-        streaming,
-        max_tokens: Math.max(0, Number(maxTokens) || 0),
+        streaming: transport.streaming,
+        max_tokens: isCodex ? 0 : Math.max(0, Number(maxTokens) || 0),
         // 字段名开关只对 openai(Chat Completions) 有意义，其它格式一律回落到默认；
         // 后端也会再做一次同样的归一化，这里只是别让 UI 送出自相矛盾的值。
         max_tokens_field: format === "openai" ? toStore(maxTokensField) : "",
-        session_header_key: sessionHeaderKey.trim(),
+        session_header_key: isCodex ? "" : sessionHeaderKey.trim(),
         retry,
       });
       if (isNew) toast.success(t("profile.toast.created", { name: name.trim() }));
@@ -456,7 +461,14 @@ function ProfileSheet({
             </div>
             <div className="grid gap-2">
               <Label>{t("profile.format.label")}</Label>
-              <Select value={format} onValueChange={(v) => setFormat(v as "anthropic" | "openai" | "openai-responses")}>
+              <Select
+                value={format}
+                onValueChange={(v) => {
+                  setFormat(v as LLMFormat);
+                  setModels([]);
+                  setModelsOpen(false);
+                }}
+              >
                 <SelectTrigger>
                   <SelectValue placeholder={t("profile.format.placeholder")} />
                 </SelectTrigger>
@@ -464,6 +476,7 @@ function ProfileSheet({
                   <SelectItem value="anthropic">Anthropic</SelectItem>
                   <SelectItem value="openai">OpenAI (Chat Completions)</SelectItem>
                   <SelectItem value="openai-responses">OpenAI (Responses API)</SelectItem>
+                  <SelectItem value="openai-codex">{t("oauth.provider")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -475,7 +488,7 @@ function ProfileSheet({
               <Input
                 id="p-model"
                 className="font-mono"
-                placeholder="claude-opus-4-8"
+                placeholder={isCodex ? t("oauth.modelHint") : "claude-opus-4-8"}
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
               />
@@ -522,7 +535,8 @@ function ProfileSheet({
               id="p-base-url"
               className="font-mono"
               placeholder="https://api.openai.com/v1"
-              value={baseUrl}
+              readOnly={isCodex}
+              value={isCodex ? "https://chatgpt.com/backend-api/codex" : baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
             />
           </div>
@@ -533,36 +547,42 @@ function ProfileSheet({
               id="p-proxy"
               className="font-mono"
               placeholder="socks5://user:pass@127.0.0.1:1080 · http://127.0.0.1:8080"
-              value={proxy}
+              value={effectiveProxy}
+              disabled={isCodex}
               onChange={(e) => setProxy(e.target.value)}
             />
             <p className="text-muted-foreground text-xs">{t("profile.proxy.hint")}</p>
           </div>
 
-          <div className="grid gap-2">
-            <Label htmlFor="p-session-header">{t("profile.sessionHeader.label")}</Label>
-            <Input
-              id="p-session-header"
-              className="font-mono"
-              placeholder={t("profile.sessionHeader.placeholder")}
-              value={sessionHeaderKey}
-              onChange={(e) => setSessionHeaderKey(e.target.value)}
-            />
-            <p className="text-muted-foreground text-xs">
-              {t.rich("profile.sessionHeader.hint", { b: (c) => <b>{c}</b> })}
-            </p>
-          </div>
+          {!isCodex && (
+            <div className="grid gap-2">
+              <Label htmlFor="p-session-header">{t("profile.sessionHeader.label")}</Label>
+              <Input
+                id="p-session-header"
+                className="font-mono"
+                placeholder={t("profile.sessionHeader.placeholder")}
+                value={sessionHeaderKey}
+                onChange={(e) => setSessionHeaderKey(e.target.value)}
+              />
+              <p className="text-muted-foreground text-xs">
+                {t.rich("profile.sessionHeader.hint", { b: (c) => <b>{c}</b> })}
+              </p>
+            </div>
+          )}
 
-          <div className="grid gap-2">
-            <Label htmlFor="p-api-key">API Key</Label>
-            <Input
-              id="p-api-key"
-              type="password"
-              placeholder={keyHint ? t("profile.apiKey.placeholderSet", { hint: keyHint }) : "sk-…"}
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-            />
-          </div>
+          {open && isCodex && <CodexOAuthPanel />}
+          {!isCodex && (
+            <div className="grid gap-2">
+              <Label htmlFor="p-api-key">API Key</Label>
+              <Input
+                id="p-api-key"
+                type="password"
+                placeholder={keyHint ? t("profile.apiKey.placeholderSet", { hint: keyHint }) : "sk-…"}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+              />
+            </div>
+          )}
 
           <div className="grid gap-4 sm:grid-cols-3">
             <div className="grid gap-2">
@@ -616,71 +636,80 @@ function ProfileSheet({
                 <Label className="text-sm">{t("profile.streaming.label")}</Label>
                 <p className="text-muted-foreground text-xs">{t("profile.streaming.hint")}</p>
               </div>
-              <Switch checked={streaming} onCheckedChange={setStreaming} aria-label={t("profile.streaming.aria")} />
-            </div>
-          </div>
-
-          <div className="grid gap-3 rounded-lg border p-3">
-            <div className="flex items-center justify-between gap-4">
-              <div className="grid gap-0.5">
-                <Label htmlFor="p-max-tokens" className="text-sm">
-                  {t("profile.maxTokens.label")}
-                </Label>
-                <p className="text-muted-foreground text-xs">{t("profile.maxTokens.hint")}</p>
-              </div>
-              <Input
-                id="p-max-tokens"
-                type="number"
-                min={0}
-                className="w-28 shrink-0"
-                value={maxTokens}
-                onChange={(e) => setMaxTokens(e.target.value)}
-                placeholder="0"
+              <Switch
+                checked={transport.streaming}
+                disabled={isCodex}
+                onCheckedChange={setStreaming}
+                aria-label={t("profile.streaming.aria")}
               />
             </div>
-            <div className="flex items-center justify-between gap-4 border-t pt-3">
-              <div className="grid gap-0.5">
-                <Label className="text-sm">{t("profile.maxTokensField.label")}</Label>
-                <p className="text-muted-foreground text-xs">{t(`profile.maxTokensFieldHint.${format}`)}</p>
-              </div>
-              <Select
-                value={format === "openai" ? maxTokensField : NONE}
-                onValueChange={setMaxTokensField}
-                disabled={format !== "openai"}
-              >
-                <SelectTrigger className="w-56 shrink-0">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {MAX_TOKENS_FIELDS.map((o) => (
-                    <SelectItem key={o.value} value={o.value}>
-                      {o.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
           </div>
 
-          <div className="grid gap-3 rounded-lg border p-3">
-            <div className="flex items-center justify-between gap-4">
-              <div className="grid gap-0.5">
-                <Label className="text-sm">{t("profile.thinkingType.label")}</Label>
-                <p className="text-muted-foreground text-xs">{t("profile.thinkingType.hint")}</p>
+          {!isCodex && (
+            <div className="grid gap-3 rounded-lg border p-3">
+              <div className="flex items-center justify-between gap-4">
+                <div className="grid gap-0.5">
+                  <Label htmlFor="p-max-tokens" className="text-sm">
+                    {t("profile.maxTokens.label")}
+                  </Label>
+                  <p className="text-muted-foreground text-xs">{t("profile.maxTokens.hint")}</p>
+                </div>
+                <Input
+                  id="p-max-tokens"
+                  type="number"
+                  min={0}
+                  className="w-28 shrink-0"
+                  value={maxTokens}
+                  onChange={(e) => setMaxTokens(e.target.value)}
+                  placeholder="0"
+                />
               </div>
-              <Select value={thinkingType} onValueChange={setThinkingType}>
-                <SelectTrigger className="w-32 shrink-0">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {THINKING_TYPES.map((o) => (
-                    <SelectItem key={o.value} value={o.value}>
-                      {o.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="flex items-center justify-between gap-4 border-t pt-3">
+                <div className="grid gap-0.5">
+                  <Label className="text-sm">{t("profile.maxTokensField.label")}</Label>
+                  <p className="text-muted-foreground text-xs">{t(`profile.maxTokensFieldHint.${format}`)}</p>
+                </div>
+                <Select
+                  value={format === "openai" ? maxTokensField : NONE}
+                  onValueChange={setMaxTokensField}
+                  disabled={format !== "openai"}
+                >
+                  <SelectTrigger className="w-56 shrink-0">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {MAX_TOKENS_FIELDS.map((o) => (
+                      <SelectItem key={o.value} value={o.value}>
+                        {o.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
+          )}
+
+          <div className="grid gap-3 rounded-lg border p-3">
+            {!isCodex && (
+              <div className="flex items-center justify-between gap-4">
+                <div className="grid gap-0.5">
+                  <Label className="text-sm">{t("profile.thinkingType.label")}</Label>
+                  <p className="text-muted-foreground text-xs">{t("profile.thinkingType.hint")}</p>
+                </div>
+                <Select value={thinkingType} onValueChange={setThinkingType}>
+                  <SelectTrigger className="w-32 shrink-0">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {THINKING_TYPES.map((o) => (
+                      <SelectItem key={o.value} value={o.value}>
+                        {o.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             <div className="flex items-center justify-between gap-4 border-t pt-3">
               <div className="grid gap-0.5">
                 <Label className="text-sm">{t("profile.effort.label")}</Label>
@@ -739,7 +768,7 @@ export default function LLMPage() {
   // 一个配置在卡片上显示的「是否正常」。没填 Key 的配置根本发不出请求，比熔断更该先说。
   const healthOf = React.useCallback(
     (p: LLMProfile, m?: LLMPoolMember): Health => {
-      if (!p.api_key_hint) {
+      if (p.format !== "openai-codex" && !p.api_key_hint) {
         return {
           label: t("health.noKey.label"),
           cls: "border-muted-foreground/40 text-muted-foreground",
@@ -761,6 +790,13 @@ export default function LLMPage() {
           label: t("health.degraded", { fails: m.fails }),
           cls: "border-amber-500/50 text-amber-600 dark:text-amber-400",
           hint: m.last_error,
+        };
+      }
+      if (p.format === "openai-codex") {
+        return {
+          label: t("oauth.title"),
+          hint: t("oauth.shared"),
+          cls: "border-muted-foreground/40 text-muted-foreground",
         };
       }
       return { label: t("health.ok"), cls: "border-emerald-500/50 text-emerald-600 dark:text-emerald-400" };
@@ -895,7 +931,7 @@ export default function LLMPage() {
                     </div>
 
                     <div className="flex flex-wrap gap-x-3 gap-y-0.5 pl-6 text-muted-foreground text-xs">
-                      {p.api_key_hint && <span>{p.api_key_hint}</span>}
+                      {p.format !== "openai-codex" && p.api_key_hint && <span>{p.api_key_hint}</span>}
                       <span>
                         {p.rate_per_second}/s · {p.rate_per_minute}/min
                       </span>

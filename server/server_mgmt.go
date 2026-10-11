@@ -1875,6 +1875,17 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	p := body.LLMProfile
 	p.APIKey = body.APIKey
 	p.Streaming = body.Streaming == nil || *body.Streaming
+	if p.Format == "openai-codex" {
+		if p.BaseURL != "" || p.APIKey != "" || p.Proxy != "" {
+			writeErr(w, 400, "Codex OAuth does not accept base URL, API key or proxy overrides")
+			return
+		}
+		if strings.TrimSpace(p.Model) == "" {
+			writeErr(w, 400, "Codex model selection required")
+			return
+		}
+		p.Streaming = true
+	}
 	// 输出上限:负数无意义,归零(= 不发送该字段)。字段名开关只有 Chat Completions
 	// 用得上——anthropic 与 openai-responses 各自定死了字段名,存下来只会误导后续读者,
 	// 故非 openai 格式一律清空。未知取值同样清空,避免把 DB CHECK 的报错甩给用户。
@@ -1995,6 +2006,18 @@ func (s *Server) pgActivateProfile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// Never persist a disconnected OAuth selection while the previous global
+	// runtime is still installed under its old model/profile identity.
+	if p, err := pg.ProfileByID(body.ID); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	} else if p != nil && p.Format == "openai-codex" {
+		cfg := s.bindOAuth(agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy))
+		if !cfg.Ready() {
+			writeErr(w, 503, "Codex OAuth login required")
+			return
+		}
+	}
 	if err := pg.SetActiveProfile(body.ID); err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -2052,6 +2075,23 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decode(r, &req); err != nil {
 		writeErr(w, 400, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Provider) == "openai-codex" {
+		if strings.TrimSpace(req.BaseURL) != "" || strings.TrimSpace(req.APIKey) != "" || strings.TrimSpace(req.Proxy) != "" {
+			writeErr(w, 400, "Codex OAuth does not accept base URL, API key or proxy overrides")
+			return
+		}
+		if s.codex == nil {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "Codex OAuth login required"})
+			return
+		}
+		models, err := s.codex.Models(r.Context())
+		if err != nil {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "models": models})
 		return
 	}
 	// Resolve API key: form input > profile stored key.

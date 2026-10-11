@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/codexoauth"
 	"github.com/Autumn-27/artex/config"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
@@ -109,6 +110,7 @@ const (
 // Server exposes the ARTEX backend over a JSON HTTP API for the shadcn/ui
 // frontend.
 type Server struct {
+	codex  *codexoauth.Auth
 	m      *Manager
 	engine *Engine
 	ctx    context.Context
@@ -236,6 +238,11 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
+	if path, err := codexAuthPath(keyDir, dataDir); err == nil {
+		s.codex = codexoauth.New(path)
+	} else {
+		log.Printf("[codex-oauth] secure credential store disabled: %v", err)
+	}
 	// First-run protection: cache the password hash and, while none is set, issue
 	// the console setup token (or apply ARTEX_ADMIN_PASSWORD) before any request.
 	s.bootstrapAuth()
@@ -258,7 +265,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	s.engine.SetReadiness(func() bool {
 		s.cfgMu.Lock()
 		defer s.cfgMu.Unlock()
-		return s.llmOn
+		return s.llmOn && (s.llmCfg.Provider() != "openai-codex" || s.llmCfg.Ready())
 	})
 	// Wire DB-stored prompt templates into the agents (新版方案 §3.3 / §5a). With no
 	// override row, agents keep their built-in defaults — behavior is unchanged.
@@ -354,6 +361,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			log.Printf("[engine] LLM configured from DB: %s / %s", cfg.Provider(), cfg.Model)
 		}
 	} else if cfg, ok := agent.FromEnv(); ok {
+		cfg = s.bindOAuth(cfg)
 		if err := s.applyLLM(cfg); err != nil {
 			log.Printf("[engine] env provider init failed — engine idle: %v", err)
 		} else {
@@ -435,7 +443,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	if err != nil || p == nil {
 		return agent.Config{}, false
 	}
-	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
+	cfg := s.bindOAuth(agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy))
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
 	cfg.ThinkingType = p.ThinkingType
@@ -444,7 +452,9 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	cfg.SessionHeaderKey = p.SessionHeaderKey
 	s.applyProfileRetry(&cfg, p)
-	if cfg.APIKey == "" {
+	// A selected OAuth profile is still the authoritative selection when
+	// disconnected; do not replace its identity with an environment fallback.
+	if !cfg.Ready() && cfg.Provider() != "openai-codex" {
 		return cfg, false
 	}
 	s.cfgMu.Lock()
@@ -496,13 +506,26 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 
 // reapplyActiveProfile hot-reloads the engine from the active DB profile so that
 // saving or activating a profile takes effect without a restart. Best-effort:
-// logs on failure and leaves the running engine untouched.
+// logs on failure; an unavailable selected OAuth profile disables the old runtime
+// instead of leaving another model installed under the new selection.
 func (s *Server) reapplyActiveProfile() {
 	cfg, ok := s.loadLLMConfig()
 	if !ok {
 		return
 	}
 	if err := s.applyLLM(cfg); err != nil {
+		if cfg.Provider() == "openai-codex" {
+			// The selected profile changed, so keeping the previous runtime
+			// would execute another model under the new profile's identity.
+			s.cfgMu.Lock()
+			s.llmCfg = cfg
+			s.llmOn = false
+			s.llmProv = nil
+			s.llmDirect = nil
+			s.chatAgent = nil
+			s.cfgMu.Unlock()
+			s.invalidateTaskAgents()
+		}
 		log.Printf("[engine] reapply active profile failed: %v", err)
 		return
 	}
@@ -536,12 +559,17 @@ func maxTokensResolver(cfg agent.Config) func() int {
 // applyLLM (re)builds the planner/worker/main-agent from cfg and installs them on
 // the running engine as the GLOBAL active pair. Safe to call at runtime (UI configures LLM).
 func (s *Server) applyLLM(cfg agent.Config) error {
+	if cfg.Provider() == "openai-codex" && !cfg.Ready() {
+		return codexoauth.ErrDisconnected
+	}
 	var prov llm.Provider
 	// A persisted active profile must use the same cached provider as task chains
 	// and Agent bindings, otherwise each path owns a separate rate limiter.
-	if active, _ := s.m.pg.ActiveProfile(); active != nil {
-		if activeCfg, ok := s.loadProfileConfig(active.ID); ok && activeCfg == cfg {
-			prov, _, _ = s.providerForProfile(active.ID)
+	if s.m.pg != nil {
+		if active, _ := s.m.pg.ActiveProfile(); active != nil {
+			if activeCfg, ok := s.loadProfileConfig(active.ID); ok && activeCfg == cfg {
+				prov, _, _ = s.providerForProfile(active.ID)
+			}
 		}
 	}
 	if prov == nil {
@@ -563,8 +591,10 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	// LLM 轮询(默认关):把激活配置包进故障转移链,当前配置不可用时自动切下一个。
 	// 只影响「走全局激活配置」的这条路径——agent 绑定 / 任务 pin 的走 providerForProfile,
 	// 默认仍然独占该配置(见 poolForBinding)。关闭或无备选时返回原 provider,行为不变。
-	if act, err := s.m.pg.ActiveProfile(); err == nil && act != nil {
-		prov = s.poolForActive(act.ID, prov, cfg)
+	if s.m.pg != nil {
+		if act, err := s.m.pg.ActiveProfile(); err == nil && act != nil {
+			prov = s.poolForActive(act.ID, prov, cfg)
+		}
 	}
 	// No global planner/worker pair: every task runs on its own task-routed pair
 	// (agentsForTask), resolved through the engine's authoritative resolver. Global
@@ -606,7 +636,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	if err != nil || p == nil {
 		return agent.Config{}, false
 	}
-	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
+	cfg := s.bindOAuth(agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy))
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
 	cfg.ThinkingType = p.ThinkingType
@@ -615,7 +645,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	cfg.SessionHeaderKey = p.SessionHeaderKey
 	s.applyProfileRetry(&cfg, p)
-	if cfg.APIKey == "" {
+	if !cfg.Ready() {
 		return cfg, false
 	}
 	return cfg, true
@@ -646,6 +676,10 @@ func (s *Server) resolveChatAgent(c *db.Conversation) *agent.ChatAgent {
 	if eff := s.effectiveProfileForAgent(c.AgentKey, c.LLMProfileID); eff != nil {
 		if pa := s.chatAgentForProfile(*eff); pa != nil {
 			ca = pa
+		} else if _, cfg, _ := s.providerForProfile(*eff); cfg.Provider() == "openai-codex" {
+			// An explicit disconnected OAuth selection must not silently use a
+			// different model from the global fallback.
+			return nil
 		}
 	}
 	return ca
@@ -673,13 +707,16 @@ func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool)
 	s.provCacheMu.Lock()
 	if e := s.provByProfile[id]; e != nil {
 		s.provCacheMu.Unlock()
+		if e.cfg.Provider() == "openai-codex" && !e.cfg.Ready() {
+			return nil, e.cfg, false
+		}
 		return e.prov, e.cfg, true
 	}
 	generation := s.provCacheGen
 	s.provCacheMu.Unlock()
 	cfg, ok := s.loadProfileConfig(id)
 	if !ok {
-		return nil, agent.Config{}, false
+		return nil, cfg, false
 	}
 	prov, err := cfg.NewProvider()
 	if err != nil {
@@ -712,12 +749,14 @@ func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
 	s.profMu.Lock()
 	cached := s.profChatAgents[id]
 	s.profMu.Unlock()
-	if cached != nil {
-		return cached
-	}
+	// Validate the provider even for an already-built chat agent: logout or a
+	// permanent refresh rejection can revoke its shared OAuth account.
 	prov, cfg, ok := s.providerForProfile(id)
 	if !ok {
 		return nil
+	}
+	if cached != nil {
+		return cached
 	}
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	ca := agent.NewChatAgent(s.poolForBinding(id, prov, cfg), cfg.Model, s.m.dir, tx, cfg.CompactionWindow())
@@ -754,6 +793,9 @@ func (s *Server) invalidateProfileAgents() {
 func (s *Server) chatAgentRef() *agent.ChatAgent {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
+	if s.llmCfg.Provider() == "openai-codex" && !s.llmCfg.Ready() {
+		return nil
+	}
 	return s.chatAgent
 }
 
@@ -847,6 +889,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/llm", s.getLLM)
 	mux.HandleFunc("POST /api/llm", s.setLLM)
 	mux.HandleFunc("POST /api/llm/test", s.testLLM)
+	mux.HandleFunc("POST /api/llm/oauth/codex/start", s.codexStart)
+	mux.HandleFunc("POST /api/llm/oauth/codex/poll", s.codexPoll)
+	mux.HandleFunc("GET /api/llm/oauth/codex/status", s.codexStatus)
+	mux.HandleFunc("DELETE /api/llm/oauth/codex", s.codexLogout)
 
 	// asset system
 	mux.HandleFunc("GET /api/assets", s.listAssets)
@@ -1398,7 +1444,7 @@ func (s *Server) getLLM(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 	writeJSON(w, 200, map[string]any{
-		"configured":       s.llmOn,
+		"configured":       s.llmOn && (s.llmCfg.Provider() != "openai-codex" || s.llmCfg.Ready()),
 		"provider":         s.llmCfg.Provider(),
 		"model":            s.llmCfg.Model,
 		"base_url":         s.llmCfg.BaseURL,
@@ -1430,7 +1476,7 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
+	cfg := s.bindOAuth(agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy))
 	cfg.RatePerSecond, cfg.RatePerMinute = req.RatePerSecond, req.RatePerMinute
 	cfg.ThinkingType = req.ThinkingType
 	cfg.ReasoningEffort = req.ReasoningEffort
@@ -1440,13 +1486,13 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg.ContextWindowK = k
 	}
-	if cfg.APIKey == "" {
+	if cfg.Provider() != "openai-codex" && cfg.APIKey == "" {
 		s.cfgMu.Lock()
 		cfg.APIKey = s.llmCfg.APIKey // keep existing key if not re-entered
 		s.cfgMu.Unlock()
 	}
-	if cfg.APIKey == "" {
-		writeErr(w, 400, "api_key required")
+	if !cfg.Ready() {
+		writeErr(w, 400, "API key or connected Codex OAuth account required")
 		return
 	}
 	// Validate provider construction before persisting it as the active profile.
@@ -1489,7 +1535,7 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
+	cfg := s.bindOAuth(agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy))
 	// mirror production: send the SAME thinking params so a provider that rejects the
 	// reasoning_effort/thinking field fails the test too (no false "test ok, run 400").
 	cfg.ThinkingType = req.ThinkingType
@@ -1506,7 +1552,7 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	// API Key 解析优先级：表单输入 > 指定 profile 存的 key > 全局配置的 key。
 	// 已存 profile 的 key 不回传浏览器，所以测试已存配置时表单为空，需从 DB 取。
 	// 会话头名同理：表单未带时用已存 profile 的值兜底。
-	if req.ProfileID != nil && (cfg.APIKey == "" || cfg.SessionHeaderKey == "") {
+	if cfg.Provider() != "openai-codex" && req.ProfileID != nil && (cfg.APIKey == "" || cfg.SessionHeaderKey == "") {
 		if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
 			if cfg.APIKey == "" {
 				cfg.APIKey = p.APIKey
@@ -1516,12 +1562,12 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if cfg.APIKey == "" {
+	if cfg.Provider() != "openai-codex" && cfg.APIKey == "" {
 		s.cfgMu.Lock()
 		cfg.APIKey = s.llmCfg.APIKey
 		s.cfgMu.Unlock()
 	}
-	if cfg.APIKey == "" {
+	if !cfg.Ready() {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": trMsg(errLLMTestNoAPIKey)})
 		return
 	}

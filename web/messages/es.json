@@ -3218,6 +3218,29 @@
     }
   },
   "llmPage": {
+    "oauth": {
+      "provider": "OpenAI Codex (ChatGPT OAuth)",
+      "title": "ChatGPT OAuth",
+      "shared": "Todas las configuraciones Codex de este servidor comparten una cuenta ChatGPT. Iniciar sesión no activa una configuración.",
+      "checking": "Comprobando conexión…",
+      "starting": "Iniciando…",
+      "connected": "Conectado",
+      "disconnected": "Sin conexión",
+      "pending": "Esperando aprobación…",
+      "expired": "El inicio de sesión caducó. Vuelve a empezar.",
+      "cancelled": "Inicio de sesión cancelado.",
+      "error": "Error de autenticación. Inténtalo de nuevo.",
+      "invalidResponse": "Respuesta de acceso por dispositivo no válida.",
+      "openVerification": "Abrir la página oficial de verificación",
+      "code": "Código del dispositivo:",
+      "copy": "Copiar código",
+      "deadline": "Caduca: {expires} · Intervalo: {seconds}s",
+      "restart": "Reiniciar sesión",
+      "login": "Conectar ChatGPT",
+      "cancel": "Cancelar acceso",
+      "logout": "Desconectar todas las configuraciones Codex",
+      "modelHint": "Cargar modelos del servidor"
+    },
     "page": {
       "subtitle": "Configuración de formato / modelo / límite de velocidad compartida por todos los agentes. Haga clic en una tarjeta para editarla; la estrella indica el perfil activo.",
       "poolConfig": "Configuración de rotación",

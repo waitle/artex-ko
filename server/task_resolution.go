@@ -41,7 +41,7 @@ func (s *Server) resolutionFromProfile(p *db.LLMProfile, source string) taskLLMR
 		Model:     p.Model,
 		Source:    source,
 	}
-	if p.APIKey == "" {
+	if p.Format != "openai-codex" && p.APIKey == "" {
 		result.Reason = reasonLLMProfileNoAPIKey
 		return result
 	}
@@ -100,7 +100,7 @@ func (s *Server) resolveTaskRoleLLM(t *Task, agentKey string) (taskLLMResolution
 	s.cfgMu.Lock()
 	on, name, cfg := s.llmOn, s.llmProf, s.llmCfg
 	s.cfgMu.Unlock()
-	if on {
+	if on && (cfg.Provider() != "openai-codex" || cfg.Ready()) {
 		if name == "" {
 			name = sourceNameGlobalConfig
 		}
