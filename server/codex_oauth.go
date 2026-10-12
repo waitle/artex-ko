@@ -4,11 +4,17 @@ import (
 	"errors"
 	"github.com/Autumn-27/artex/agent"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 )
 
 func codexAuthPath(keyDir, dataDir string) (string, error) {
+	// Containers need a directory mount: atomic credential rotation cannot
+	// safely replace an individually bind-mounted file.
+	if dir := strings.TrimSpace(os.Getenv("ARTEX_CODEX_AUTH_DIR")); dir != "" {
+		keyDir = dir
+	}
 	k, e := filepath.Abs(keyDir)
 	if e != nil {
 		return "", e

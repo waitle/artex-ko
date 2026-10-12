@@ -40,7 +40,10 @@ revoked cached agents report unavailable rather than using another global model.
 ## Credentials and transport
 
 The canonical file is `codex-oauth.json` beside `jwt.key` in the server key
-directory, **outside the browsable data tree**. Symlink-resolved directories are
+directory by default. Set `ARTEX_CODEX_AUTH_DIR` to a private persistent directory
+for containers; mount the directory, not a single credential file, because token
+rotation uses atomic rename. The directory must remain **outside the browsable
+data tree**. Symlink-resolved directories are
 checked; OAuth is disabled if key and data directories overlap. Credentials are
 stored with mode `0600`, synced and atomically renamed. Non-regular files and
 files with unsafe permissions are rejected. Credential values never appear in
