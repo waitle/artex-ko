@@ -451,6 +451,12 @@ func quotaAwareHTTPClient(proxy, sessionHeaderKey string) (*http.Client, error) 
 // just the collapsed ok/err the UI shows. Bodies are clipped to keep a chatty
 // SSE stream from flooding the log.
 func logTestConnection(c Config, capt *llmrec.Capture) {
+	// OAuth transport intentionally bypasses raw-wire capture so credentials
+	// and upstream private payloads cannot enter logs. An empty capture is
+	// expected here, not evidence that an HTTP request was never sent.
+	if c.Provider() == "openai-codex" {
+		return
+	}
 	attempts := capt.Attempts()
 	if len(attempts) == 0 {
 		log.Printf("[llm-test] %s / %s @ %s — 未发出任何 HTTP 请求(配置解析或建连即失败)",
