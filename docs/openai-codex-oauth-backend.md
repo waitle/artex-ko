@@ -27,7 +27,11 @@ failure; it does not invent a code or silently switch authentication mechanisms.
 Choose `format: "openai-codex"`, leave API key/base URL/proxy empty, and select an
 exact model from the authenticated catalog returned by `POST /api/llm/models`
 with `{"provider":"openai-codex"}`. The server fetches the fixed Codex `/models`
-endpoint; no guessed/offline model catalog is substituted. Saving profiles is
+endpoint; no guessed/offline model catalog is substituted. Catalog discovery
+uses verified Codex client compatibility version `0.162.1` rather than `0.0.0`
+(which omits newer models), and excludes entries marked `hide`/`hidden`.
+Recheck this version against official Codex releases when upgrading the integration.
+Saving profiles is
 allowed before login, but runtime readiness requires an owned connected account.
 Environment bootstrap can use `ARTEX_LLM_PROVIDER=openai-codex` and an explicit
 `ARTEX_LLM_MODEL`; it still requires this server's own OAuth login. With no active

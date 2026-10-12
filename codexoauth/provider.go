@@ -355,13 +355,18 @@ func (p provider) Complete(ctx context.Context, r llm.CompletionRequest) (llm.Me
 	}
 	return m, stop, u, nil
 }
+
+// Use a verified official Codex release version for catalog compatibility;
+// 0.0.0 causes the backend to omit newer models for the same account.
+const catalogClientVersion = "0.162.1"
+
 func (a *Auth) Models(ctx context.Context) ([]string, error) {
 	ctx, token, account, cleanup, e := a.beginRequest(ctx)
 	if e != nil {
 		return nil, e
 	}
 	defer cleanup()
-	r, _ := http.NewRequestWithContext(ctx, "GET", Backend+"/models?client_version=0.0.0", nil)
+	r, _ := http.NewRequestWithContext(ctx, "GET", Backend+"/models?client_version="+catalogClientVersion, nil)
 	headers(r, token, account)
 	r.Header.Set("Accept", "application/json")
 	resp, e := a.client.Do(r)
@@ -400,6 +405,11 @@ func (a *Auth) Models(ctx context.Context) ([]string, error) {
 		case string:
 			add(m)
 		case map[string]any:
+			visibility, _ := m["visibility"].(string)
+			switch strings.ToLower(strings.TrimSpace(visibility)) {
+			case "hide", "hidden":
+				continue
+			}
 			for _, k := range []string{"slug", "id", "name"} {
 				if s, ok := m[k].(string); ok && strings.TrimSpace(s) != "" {
 					add(s)

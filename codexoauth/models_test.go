@@ -19,7 +19,7 @@ type fixtureTransport struct {
 }
 
 func (f fixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if r.URL.String() != Backend+"/models?client_version=0.0.0" {
+	if r.URL.String() != Backend+"/models?client_version=0.162.1" {
 		f.t.Errorf("unexpected catalog destination %s", r.URL)
 	}
 	r = r.Clone(r.Context())
